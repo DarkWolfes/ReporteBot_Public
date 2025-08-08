@@ -10,7 +10,8 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ConversationHandler,
-    CallbackQueryHandler
+    CallbackQueryHandler,
+    Application
 )
 import re
 
@@ -639,76 +640,79 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
 # --- CONSTRUCCIÓN DE LA APLICACIÓN Y FASTAPI ---
 init_db()
 
+# Inicializamos la aplicación del bot de forma global, pero la configuramos en un evento de inicio.
+application = None
 app = FastAPI()
-application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Definimos los handlers para la aplicación del bot
-main_handler = ConversationHandler(
-    entry_points=[
-        CommandHandler('start', start_command, filters.ChatType.PRIVATE),
-    ],
-    states={
-        MENU_STATE: [
-            MessageHandler(filters.Regex('^¿Para qué sirve este bot?.*$'), handle_about_button),
-            MessageHandler(filters.Regex('^Configurar mi bot$'), handle_config_bot_button),
-            MessageHandler(filters.Regex('^Herramientas de Administrador$'), handle_admin_tools_button),
-        ],
-        ADMIN_MENU_STATE: [
-            MessageHandler(filters.Regex('^Bot Info$'), handle_bot_info_button),
-            MessageHandler(filters.Regex('^Check Reports$'), handle_check_reports_button),
-            MessageHandler(filters.Regex('^Volver$'), handle_back_button),
-        ],
-        GET_CHANNEL_ID_FROM_FORWARD: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel_id_from_forward)
-        ],
-        GET_ADMINS_IDS: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_admins_ids)
-        ],
-        AWAITING_RECONFIG_CONFIRMATION: [
-            CallbackQueryHandler(handle_reconfig_confirmation),
-            MessageHandler(filters.Regex('^¿Para qué sirve este bot?.*$'), handle_about_button),
-            MessageHandler(filters.Regex('^Herramientas de Administrador$'), handle_admin_tools_button),
-        ],
-    },
-    fallbacks=[CommandHandler('cancel', cancel_any_flow)],
-    allow_reentry=True,
-)
-
-report_handler = ConversationHandler(
-    entry_points=[
-        CallbackQueryHandler(start_private_report_from_button, pattern="^start_report$")
-    ],
-    states={
-        GET_SPAMMER_USERNAME: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_spammer_username)
-        ],
-        GET_REPORT_DESCRIPTION: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_report_description)
-        ],
-        GET_REPORT_PHOTO: [
-            MessageHandler(filters.PHOTO, process_guided_report_photo)
-        ],
-    },
-    fallbacks=[CommandHandler('cancel', cancel_any_flow)],
-    allow_reentry=True,
-)
-
-application.add_handler(main_handler)
-application.add_handler(report_handler)
-application.add_handler(CallbackQueryHandler(handle_report_action_button))
-application.add_handler(CommandHandler('configurar_aqui', configure_group_in_group))
-application.add_handler(CommandHandler('desconfigurar_aqui', unconfigure_group_in_group))
-application.add_handler(CommandHandler('reportar', start_report_from_group_command, filters.ChatType.GROUPS))
-application.add_handler(CommandHandler('ayuda', ayuda_command))
-application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
-
-# --- Funciones de inicio y apagado de FastAPI ---
-@app.on_event("startup")
-async def startup_event():
+async def create_app():
+    global application
+    
     if not BOT_TOKEN or not WEBHOOK_URL:
         logger.error("No se pudo iniciar la aplicación: TOKEN o WEBHOOK_URL no están configurados.")
         raise HTTPException(status_code=500, detail="Configuración de entorno incompleta.")
 
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Definimos los handlers para la aplicación del bot
+    main_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler('start', start_command, filters.ChatType.PRIVATE),
+        ],
+        states={
+            MENU_STATE: [
+                MessageHandler(filters.Regex('^¿Para qué sirve este bot?.*$'), handle_about_button),
+                MessageHandler(filters.Regex('^Configurar mi bot$'), handle_config_bot_button),
+                MessageHandler(filters.Regex('^Herramientas de Administrador$'), handle_admin_tools_button),
+            ],
+            ADMIN_MENU_STATE: [
+                MessageHandler(filters.Regex('^Bot Info$'), handle_bot_info_button),
+                MessageHandler(filters.Regex('^Check Reports$'), handle_check_reports_button),
+                MessageHandler(filters.Regex('^Volver$'), handle_back_button),
+            ],
+            GET_CHANNEL_ID_FROM_FORWARD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel_id_from_forward)
+            ],
+            GET_ADMINS_IDS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_admins_ids)
+            ],
+            AWAITING_RECONFIG_CONFIRMATION: [
+                CallbackQueryHandler(handle_reconfig_confirmation),
+                MessageHandler(filters.Regex('^¿Para qué sirve este bot?.*$'), handle_about_button),
+                MessageHandler(filters.Regex('^Herramientas de Administrador$'), handle_admin_tools_button),
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_any_flow)],
+        allow_reentry=True,
+    )
+
+    report_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_private_report_from_button, pattern="^start_report$")
+        ],
+        states={
+            GET_SPAMMER_USERNAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_spammer_username)
+            ],
+            GET_REPORT_DESCRIPTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_report_description)
+            ],
+            GET_REPORT_PHOTO: [
+                MessageHandler(filters.PHOTO, process_guided_report_photo)
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_any_flow)],
+        allow_reentry=True,
+    )
+
+    application.add_handler(main_handler)
+    application.add_handler(report_handler)
+    application.add_handler(CallbackQueryHandler(handle_report_action_button))
+    application.add_handler(CommandHandler('configurar_aqui', configure_group_in_group))
+    application.add_handler(CommandHandler('desconfigurar_aqui', unconfigure_group_in_group))
+    application.add_handler(CommandHandler('reportar', start_report_from_group_command, filters.ChatType.GROUPS))
+    application.add_handler(CommandHandler('ayuda', ayuda_command))
+    application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
+    
     await application.initialize()
     logger.info("Aplicación del bot de Telegram inicializada.")
     
@@ -717,17 +721,16 @@ async def startup_event():
         logger.info("Webhook configurado correctamente.")
     except Exception as e:
         logger.error(f"Error al configurar el webhook: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al configurar el webhook: {e}")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    if application.running:
-        await application.stop()
-        logger.info("Aplicación del bot de Telegram detenida.")
+        # No levantamos una excepción para que el server pueda arrancar
+        pass
 
 # --- Rutas de FastAPI ---
 @app.post(f"/{BOT_TOKEN}")
 async def webhook_handler(request: Request):
+    if not application:
+        logger.error("La aplicación no se ha inicializado.")
+        raise HTTPException(status_code=500, detail="La aplicación no se ha inicializado.")
+    
     try:
         data = await request.json()
         update = Update.de_json(data, application.bot)
@@ -740,3 +743,13 @@ async def webhook_handler(request: Request):
 @app.get("/")
 def health_check():
     return "OK"
+
+@app.on_event("startup")
+async def startup_event():
+    await create_app()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if application and application.running:
+        await application.stop()
+        logger.info("Aplicación del bot de Telegram detenida.")

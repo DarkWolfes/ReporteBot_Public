@@ -635,17 +635,8 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
 app = Flask(__name__)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-async def webhook_handler_wrapper():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
-    return 'ok'
-
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def webhook():
-    if request.method == "POST":
-        return asyncio.run(webhook_handler_wrapper())
-    return "ok"
-
+# Mover la llamada a `add_handlers()` fuera del bloque if __name__ == '__main__':
+# para que los manejadores se agreguen antes de que el servidor inicie.
 def add_handlers():
     main_handler = ConversationHandler(
         entry_points=[
@@ -708,10 +699,22 @@ def add_handlers():
 
     application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
 
+add_handlers()
+
+async def webhook_handler_wrapper():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
+    return 'ok'
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    if request.method == "POST":
+        return asyncio.run(webhook_handler_wrapper())
+    return "ok"
+
 if __name__ == '__main__':
     # La parte clave: inicializar la aplicación antes del servidor
     init_db()
-    add_handlers()
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL") + f'/{BOT_TOKEN}'
 

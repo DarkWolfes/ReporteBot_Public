@@ -627,23 +627,22 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
         )
         await update.message.reply_text(mensaje, parse_mode="HTML")
 
-# --- NUEVO CÓDIGO PARA WEBHOOKS ---
-async def webhook_handler(request):
+# --- CÓDIGO CORREGIDO PARA WEBHOOKS ---
+app = Flask(__name__)
+
+async def webhook_handler():
     try:
-        # Telegram siempre envía los datos en formato JSON
-        update_json = await request.get_json()
-        update = Update.de_json(update_json, application.bot)
+        update = Update.de_json(request.get_json(force=True), application.bot)
         await application.process_update(update)
-        return {"status": "ok"}, 200
+        return 'ok', 200
     except Exception as e:
         logging.error(f"Error procesando el webhook: {e}")
-        return {"status": "error"}, 500
+        return 'error', 500
 
 def main() -> None:
-    global application # Se necesita la variable global para el handler del webhook
+    global application
     init_db()
     
-    # Construye la aplicación
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     main_handler = ConversationHandler(
@@ -707,10 +706,6 @@ def main() -> None:
 
     application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
 
-    # Ejecuta la aplicación de Flask para el webhook
-    app = Flask(__name__)
-    app.route(f'/{BOT_TOKEN}', methods=['POST'])(webhook_handler)
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-
 if __name__ == '__main__':
     main()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

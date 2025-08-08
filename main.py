@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 import logging
 import os
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, error, Chat
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Chat
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -694,12 +694,14 @@ def add_handlers(application):
 
 # --- BLOQUE DEL WEBHOOK PARA RENDER ---
 app = Flask(__name__)
+# Instancia del bot de Telegram que se crea fuera del main
+application = ApplicationBuilder().token(BOT_TOKEN).build()
+add_handlers(application)
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 async def webhook():
     if request.method == "POST":
-        # Asegúrate de que `application` esté disponible aquí
-        application = app.config['TELEGRAM_BOT_APPLICATION']
+        # Usar la instancia global de 'application'
         update = Update.de_json(request.get_json(force=True), application.bot)
         await application.process_update(update)
         return 'ok'
@@ -711,13 +713,6 @@ def hello_world():
 
 if __name__ == '__main__':
     init_db()
-
-    # Creación de la instancia de Application y adición de manejadores
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    add_handlers(application)
-    
-    # Almacenar la instancia en la configuración de la app de Flask para que sea accesible en la ruta
-    app.config['TELEGRAM_BOT_APPLICATION'] = application
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL") + f'/{BOT_TOKEN}'
 

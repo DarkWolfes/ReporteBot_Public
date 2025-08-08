@@ -695,11 +695,13 @@ def add_handlers(application: Application):
 
 # --- BLOQUE DEL WEBHOOK PARA RENDER ---
 app = Flask(__name__)
+application = None # Se declara como None para que sea global y luego se inicializa en el main
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 async def webhook():
     if request.method == "POST":
         data = request.get_json(force=True)
+        # print(f"Update received: {data}") # Línea de depuración que puedes eliminar
         update = Update.de_json(data, application.bot)
         await application.process_update(update)
         return 'ok'
@@ -714,14 +716,14 @@ if __name__ == '__main__':
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     add_handlers(application)
-    application.initialize()
-
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-
-    try:
-        asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
+    
+    async def configure_app():
+        await application.initialize()
+        WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+        await application.bot.set_webhook(url=WEBHOOK_URL)
         logging.info("Webhook configurado correctamente.")
-    except Exception as e:
-        logging.error(f"Error al configurar el webhook: {e}")
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(configure_app())
 
     app.run(host='0.0.0.0', port=PORT)

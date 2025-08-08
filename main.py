@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Tu Token de Telegram
-TOKEN = "7625899075:AAGVcYR16FVc_IwXKLy--EPOyXnHmmkiw9k"
+TOKEN = "TOKEN"
 
 # --- Lógica de la Aplicación (tu código) ---
 REPORTE, TIPO_REPORTE, UBICACION_REPORTE, DETALLES_REPORTE = range(4)
@@ -61,3 +61,4 @@ async def webhook_handler():
 def health_check():
     """Verifica si el servicio está activo."""
     return "OK"
+

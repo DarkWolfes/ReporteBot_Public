@@ -11,8 +11,9 @@ from telegram.ext import (
     ConversationHandler,
     CallbackQueryHandler
 )
-from flask import Flask, request, abort
+from flask import Flask, request
 import re
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 # Configuración del logging
 logging.basicConfig(
@@ -138,7 +139,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
         
     chat = update.effective_chat
-    if chat and chat.type in [Chat.GROUP, Chat.SUPERGROUP]:
+    if chat and chat.type in [chat.GROUP, chat.SUPERGROUP]:
         await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un chat privado. Por favor, habla conmigo en privado.")
         return ConversationHandler.END
 
@@ -365,7 +366,7 @@ async def start_report_from_group_command(update: Update, context: ContextTypes.
     user = update.effective_user
     chat = update.effective_chat
     
-    if not user or not chat or chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
+    if not user or not chat or chat.type not in [chat.GROUP, chat.SUPERGROUP]:
         return ConversationHandler.END
 
     group_id = chat.id
@@ -528,7 +529,7 @@ async def configure_group_in_group(update: Update, context: ContextTypes.DEFAULT
     except Exception as e:
         logging.info(f"No se pudo borrar el mensaje del comando /configurar_aqui: {e}")
 
-    if chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
+    if chat.type not in [chat.GROUP, chat.SUPERGROUP]:
         await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un grupo.")
         return
 
@@ -565,7 +566,7 @@ async def unconfigure_group_in_group(update: Update, context: ContextTypes.DEFAU
     except Exception as e:
         logging.info(f"No se pudo borrar el mensaje del comando /desconfigurar_aqui: {e}")
     
-    if chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
+    if chat.type not in [chat.GROUP, chat.SUPERGROUP]:
         await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un grupo.")
         return
 
@@ -594,7 +595,7 @@ async def ayuda_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not user or not chat:
         return
 
-    if chat.type in [Chat.GROUP, Chat.SUPERGROUP]:
+    if chat.type in [chat.GROUP, chat.SUPERGROUP]:
         try:
             await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
         except Exception as e:
@@ -610,7 +611,7 @@ async def ayuda_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         " • <code>/desconfigurar_aqui</code> - Desvincula este grupo de tu canal de reportes."
     )
 
-    if chat.type == Chat.PRIVATE:
+    if chat.type == chat.PRIVATE:
         await update.message.reply_text(help_text, parse_mode="HTML")
     else:
         await context.bot.send_message(chat_id=chat.id, text=help_text, parse_mode="HTML")
@@ -620,24 +621,27 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
     if not user:
         return
     
-    if update.effective_chat.type == Chat.PRIVATE:
+    if update.effective_chat.type == chat.PRIVATE:
         mensaje = (
             "❌ Lo siento, no te entiendo. Si quieres hacer un reporte, ve al grupo donde ocurrió el problema y usa el comando <code>/reportar</code>."
             "Si necesitas ayuda con otra cosa, usa el comando /start."
         )
         await update.message.reply_text(mensaje, parse_mode="HTML")
 
-# --- CÓDIGO CORREGIDO PARA WEBHOOKS ---
+# --- BLOQUE DEL WEBHOOK (CORREGIDO) ---
 app = Flask(__name__)
 
-async def webhook_handler():
-    try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        await application.process_update(update)
-        return 'ok', 200
-    except Exception as e:
-        logging.error(f"Error procesando el webhook: {e}")
-        return 'error', 500
+async def webhook_handler_wrapper():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
+    return 'ok'
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+async def webhook():
+    if request.method == "POST":
+        await webhook_handler_wrapper()
+    return "ok"
+
 
 def main() -> None:
     global application

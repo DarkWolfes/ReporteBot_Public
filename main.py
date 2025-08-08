@@ -24,7 +24,7 @@ logging.basicConfig(
 
 # TU TOKEN DEL BOT, ahora se obtiene de las variables de entorno de Render
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-PORT = int(os.environ.get('PORT', 5000))
+# PORT = int(os.environ.get('PORT', 5000))  # Esta linea ya no es necesaria
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 # --- CONFIGURACIÓN DE ESTADOS DEL CONVERSATIONHANDLER ---
@@ -729,3 +729,4 @@ async def webhook():
 def hello_world():
     """Punto de entrada para la URL principal de Render."""
     return "Hello World! The bot is running on a webhook."
+

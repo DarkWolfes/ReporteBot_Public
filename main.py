@@ -1,7 +1,7 @@
 import sqlite3
 import logging
 import os
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, error
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -630,6 +630,7 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
 
 # --- BLOQUE DEL WEBHOOK (CORREGIDO) ---
 app = Flask(__name__)
+# Inicialización de la aplicación de Telegram fuera del bloque principal
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 async def webhook_handler_wrapper():
@@ -640,7 +641,7 @@ async def webhook_handler_wrapper():
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 async def webhook():
     if request.method == "POST":
-        await webhook_handler_wrapper()
+        return await webhook_handler_wrapper()
     return "ok"
 
 def add_handlers():
@@ -706,6 +707,8 @@ def add_handlers():
     application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
 
 if __name__ == '__main__':
+    # La parte clave: inicializar la aplicación antes de que el servidor web empiece
     init_db()
     add_handlers()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Ejecutar la aplicación en modo webhook
+    application.run_polling()

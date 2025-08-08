@@ -76,9 +76,10 @@ def health_check():
     return "OK"
 
 # --- Lógica de arranque con Uvicorn ---
-# Esta función es la que se llama cuando el servidor arranca.
-# Es la forma correcta de ejecutar código asíncrono una sola vez.
-async def start_webhook():
+# Esta es la forma correcta de ejecutar código asíncrono una sola vez al arrancar.
+# Uvicorn detectará esta función si se llama 'startup_event'
+# o si se registra a través de un decorador. Esta es la forma más compatible.
+async def startup_event():
     """Configura el webhook de Telegram."""
     if TOKEN and WEBHOOK_URL:
         logger.info("Configurando webhook...")
@@ -86,13 +87,10 @@ async def start_webhook():
         logger.info("Webhook configurado correctamente.")
     else:
         logger.error("No se pudo configurar el webhook: TOKEN o WEBHOOK_URL no definidos.")
-
-# Aquí registramos la función de inicio con Uvicorn
-# Uvicorn llama a esta función automáticamente cuando la aplicación está lista.
-@app.before_serving
-async def init_webhook_task():
-    """Ejecuta el setup del webhook de forma segura."""
-    await start_webhook()
+        
+# Registramos la función de inicio con Flask.
+# Aunque el decorador "@app.before_serving" no funciona, puedes usar esto.
+app.before_first_request(startup_event)
 
 # El bloque if __name__ == "__main__": es para cuando ejecutas el archivo localmente
 if __name__ == "__main__":

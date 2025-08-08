@@ -25,6 +25,7 @@ logging.basicConfig(
 # TU TOKEN DEL BOT, ahora se obtiene de las variables de entorno de Render
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 PORT = int(os.environ.get('PORT', 5000))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 # --- CONFIGURACIÓN DE ESTADOS DEL CONVERSATIONHANDLER ---
 MENU_STATE = 0
@@ -693,15 +694,35 @@ def add_handlers(application: Application):
 
     application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
 
-# --- BLOQUE DEL WEBHOOK PARA RENDER ---
+# --- CONFIGURACIÓN DEL WEBHOOK CON FLASK y PTB ---
 app = Flask(__name__)
-application = None # Se declara como None para que sea global y luego se inicializa en el main
+# Inicializar la aplicación del bot de forma global
+application = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .build()
+)
+add_handlers(application)
+init_db()
+
+async def setup_webhook():
+    """Configura el webhook al inicio del despliegue."""
+    await application.initialize()
+    if WEBHOOK_URL:
+        await application.bot.set_webhook(url=WEBHOOK_URL)
+        logging.info("Webhook configurado correctamente.")
+
+@app.before_first_request
+def start_app_setup():
+    """Llama a la función de configuración asíncrona en un hilo separado."""
+    # Como Flask no es asíncrono, necesitamos ejecutar la función de setup de esta manera.
+    asyncio.run(setup_webhook())
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 async def webhook():
+    """Endpoint del webhook para procesar las actualizaciones del bot."""
     if request.method == "POST":
         data = request.get_json(force=True)
-        # print(f"Update received: {data}") # Línea de depuración que puedes eliminar
         update = Update.de_json(data, application.bot)
         await application.process_update(update)
         return 'ok'
@@ -709,21 +730,5 @@ async def webhook():
 
 @app.route("/")
 def hello_world():
+    """Punto de entrada para la URL principal de Render."""
     return "Hello World! The bot is running on a webhook."
-
-if __name__ == '__main__':
-    init_db()
-
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    add_handlers(application)
-    
-    async def configure_app():
-        await application.initialize()
-        WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-        await application.bot.set_webhook(url=WEBHOOK_URL)
-        logging.info("Webhook configurado correctamente.")
-
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(configure_app())
-
-    app.run(host='0.0.0.0', port=PORT)

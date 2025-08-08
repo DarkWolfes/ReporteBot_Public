@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import logging
 import os
@@ -22,6 +23,7 @@ logging.basicConfig(
 
 # TU TOKEN DEL BOT, ahora se obtiene de las variables de entorno de Render
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
+PORT = int(os.environ.get('PORT', 5000))
 
 # --- CONFIGURACIÓN DE ESTADOS DEL CONVERSATIONHANDLER ---
 MENU_STATE = 0
@@ -628,9 +630,9 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
         )
         await update.message.reply_text(mensaje, parse_mode="HTML")
 
-# --- BLOQUE DEL WEBHOOK (CORREGIDO) ---
+
+# --- BLOQUE DEL WEBHOOK CORREGIDO PARA RENDER ---
 app = Flask(__name__)
-# Inicialización de la aplicación de Telegram fuera del bloque principal
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 async def webhook_handler_wrapper():
@@ -639,9 +641,9 @@ async def webhook_handler_wrapper():
     return 'ok'
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
-async def webhook():
+def webhook():
     if request.method == "POST":
-        return await webhook_handler_wrapper()
+        return asyncio.run(webhook_handler_wrapper())
     return "ok"
 
 def add_handlers():
@@ -707,8 +709,14 @@ def add_handlers():
     application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
 
 if __name__ == '__main__':
-    # La parte clave: inicializar la aplicación antes de que el servidor web empiece
+    # La parte clave: inicializar la aplicación antes del servidor
     init_db()
     add_handlers()
-    # Ejecutar la aplicación en modo webhook
-    application.run_polling()
+
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL") + f'/{BOT_TOKEN}'
+
+    # Se configura el webhook con la URL de Render antes de iniciar el servidor
+    asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
+
+    # Se arranca el servidor de Flask para que Render lo detecte
+    app.run(host='0.0.0.0', port=PORT)

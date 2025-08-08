@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 import logging
 import os
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, error
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, error, Chat
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 from flask import Flask, request
 import re
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Chat
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 # Configuración del logging
 logging.basicConfig(
@@ -630,14 +630,7 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
         )
         await update.message.reply_text(mensaje, parse_mode="HTML")
 
-
-# --- BLOQUE DEL WEBHOOK CORREGIDO PARA RENDER ---
-app = Flask(__name__)
-application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-# Mover la llamada a `add_handlers()` fuera del bloque if __name__ == '__main__':
-# para que los manejadores se agreguen antes de que el servidor inicie.
-def add_handlers():
+def add_handlers(application):
     main_handler = ConversationHandler(
         entry_points=[
             CommandHandler('start', start_command, filters.ChatType.PRIVATE),
@@ -699,27 +692,39 @@ def add_handlers():
 
     application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
 
-add_handlers()
-
-async def webhook_handler_wrapper():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
-    return 'ok'
+# --- BLOQUE DEL WEBHOOK PARA RENDER ---
+app = Flask(__name__)
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def webhook():
+async def webhook():
     if request.method == "POST":
-        return asyncio.run(webhook_handler_wrapper())
+        # Asegúrate de que `application` esté disponible aquí
+        application = app.config['TELEGRAM_BOT_APPLICATION']
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        await application.process_update(update)
+        return 'ok'
     return "ok"
 
+@app.route("/")
+def hello_world():
+    return "Hello World! The bot is running on a webhook."
+
 if __name__ == '__main__':
-    # La parte clave: inicializar la aplicación antes del servidor
     init_db()
+
+    # Creación de la instancia de Application y adición de manejadores
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    add_handlers(application)
+    
+    # Almacenar la instancia en la configuración de la app de Flask para que sea accesible en la ruta
+    app.config['TELEGRAM_BOT_APPLICATION'] = application
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL") + f'/{BOT_TOKEN}'
 
-    # Se configura el webhook con la URL de Render antes de iniciar el servidor
-    asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
+    try:
+        asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
+        logging.info("Webhook configurado correctamente.")
+    except Exception as e:
+        logging.error(f"Error al configurar el webhook: {e}")
 
-    # Se arranca el servidor de Flask para que Render lo detecte
     app.run(host='0.0.0.0', port=PORT)

@@ -696,14 +696,6 @@ def add_handlers(application: Application):
 
 # --- CONFIGURACIÓN DEL WEBHOOK CON FLASK y PTB ---
 app = Flask(__name__)
-# Inicializar la aplicación del bot de forma global
-application = (
-    ApplicationBuilder()
-    .token(BOT_TOKEN)
-    .build()
-)
-add_handlers(application)
-init_db()
 
 async def setup_webhook():
     """Configura el webhook al inicio del despliegue."""
@@ -712,11 +704,16 @@ async def setup_webhook():
         await application.bot.set_webhook(url=WEBHOOK_URL)
         logging.info("Webhook configurado correctamente.")
 
-@app.before_first_request
-def start_app_setup():
-    """Llama a la función de configuración asíncrona en un hilo separado."""
-    # Como Flask no es asíncrono, necesitamos ejecutar la función de setup de esta manera.
-    asyncio.run(setup_webhook())
+# Inicializar la aplicación del bot de forma global
+application = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .build()
+)
+
+add_handlers(application)
+init_db()
+asyncio.run(setup_webhook())
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 async def webhook():

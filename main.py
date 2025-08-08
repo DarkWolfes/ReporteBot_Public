@@ -77,7 +77,7 @@ def save_user_config(user_id, channel_id, admin_ids, is_configured=True):
     cursor = conn.cursor()
     admin_ids_str = ','.join(map(str, admin_ids))
     cursor.execute('''
-        INSERT OR REPLACE INTO users_config (user_id, channel_id, admin_ids, is_configured) 
+        INSERT OR REPLACE INTO users_config (user_id, channel_id, admin_ids, is_configured)
         VALUES (?, ?, ?, ?)
     ''', (user_id, channel_id, admin_ids_str, is_configured))
     conn.commit()
@@ -94,7 +94,7 @@ def save_group_to_channel_map(group_id, channel_id, group_name):
     conn = sqlite3.connect('bot_config.db')
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT OR REPLACE INTO group_to_channel_map (group_id, channel_id, group_name) 
+        INSERT OR REPLACE INTO group_to_channel_map (group_id, channel_id, group_name)
         VALUES (?, ?, ?)
     ''', (group_id, channel_id, group_name))
     conn.commit()
@@ -701,8 +701,9 @@ add_handlers(application)
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 async def webhook():
     if request.method == "POST":
-        # Usar la instancia global de 'application'
-        update = Update.de_json(request.get_json(force=True), application.bot)
+        data = request.get_json(force=True)
+        # print(f"Update received: {data}") # Línea de depuración que puedes eliminar
+        update = Update.de_json(data, application.bot)
         await application.process_update(update)
         return 'ok'
     return "ok"
@@ -714,7 +715,7 @@ def hello_world():
 if __name__ == '__main__':
     init_db()
 
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL") + f'/{BOT_TOKEN}'
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
     try:
         asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))

@@ -1,7 +1,7 @@
 import sqlite3
 import logging
 import os
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, error
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 from flask import Flask, request
 import re
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Chat
 
 # Configuración del logging
 logging.basicConfig(
@@ -139,7 +139,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
         
     chat = update.effective_chat
-    if chat and chat.type in [chat.GROUP, chat.SUPERGROUP]:
+    if chat and chat.type in [Chat.GROUP, Chat.SUPERGROUP]:
         await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un chat privado. Por favor, habla conmigo en privado.")
         return ConversationHandler.END
 
@@ -366,7 +366,7 @@ async def start_report_from_group_command(update: Update, context: ContextTypes.
     user = update.effective_user
     chat = update.effective_chat
     
-    if not user or not chat or chat.type not in [chat.GROUP, chat.SUPERGROUP]:
+    if not user or not chat or chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
         return ConversationHandler.END
 
     group_id = chat.id
@@ -529,7 +529,7 @@ async def configure_group_in_group(update: Update, context: ContextTypes.DEFAULT
     except Exception as e:
         logging.info(f"No se pudo borrar el mensaje del comando /configurar_aqui: {e}")
 
-    if chat.type not in [chat.GROUP, chat.SUPERGROUP]:
+    if chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
         await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un grupo.")
         return
 
@@ -566,7 +566,7 @@ async def unconfigure_group_in_group(update: Update, context: ContextTypes.DEFAU
     except Exception as e:
         logging.info(f"No se pudo borrar el mensaje del comando /desconfigurar_aqui: {e}")
     
-    if chat.type not in [chat.GROUP, chat.SUPERGROUP]:
+    if chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
         await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un grupo.")
         return
 
@@ -595,7 +595,7 @@ async def ayuda_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not user or not chat:
         return
 
-    if chat.type in [chat.GROUP, chat.SUPERGROUP]:
+    if chat.type in [Chat.GROUP, Chat.SUPERGROUP]:
         try:
             await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
         except Exception as e:
@@ -611,7 +611,7 @@ async def ayuda_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         " • <code>/desconfigurar_aqui</code> - Desvincula este grupo de tu canal de reportes."
     )
 
-    if chat.type == chat.PRIVATE:
+    if chat.type == Chat.PRIVATE:
         await update.message.reply_text(help_text, parse_mode="HTML")
     else:
         await context.bot.send_message(chat_id=chat.id, text=help_text, parse_mode="HTML")
@@ -621,7 +621,7 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
     if not user:
         return
     
-    if update.effective_chat.type == chat.PRIVATE:
+    if update.effective_chat.type == Chat.PRIVATE:
         mensaje = (
             "❌ Lo siento, no te entiendo. Si quieres hacer un reporte, ve al grupo donde ocurrió el problema y usa el comando <code>/reportar</code>."
             "Si necesitas ayuda con otra cosa, usa el comando /start."
@@ -630,6 +630,7 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
 
 # --- BLOQUE DEL WEBHOOK (CORREGIDO) ---
 app = Flask(__name__)
+application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 async def webhook_handler_wrapper():
     update = Update.de_json(request.get_json(force=True), application.bot)
@@ -642,13 +643,7 @@ async def webhook():
         await webhook_handler_wrapper()
     return "ok"
 
-
-def main() -> None:
-    global application
-    init_db()
-    
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-
+def add_handlers():
     main_handler = ConversationHandler(
         entry_points=[
             CommandHandler('start', start_command, filters.ChatType.PRIVATE),
@@ -711,5 +706,6 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
 
 if __name__ == '__main__':
-    main()
+    init_db()
+    add_handlers()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))

@@ -43,7 +43,7 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
 # --- Handlers de Flask para el Webhook ---
-@app.post(f"/")
+@app.post(f"/{TOKEN}")
 async def webhook_handler():
     """Maneja las actualizaciones de Telegram."""
     if not TOKEN:

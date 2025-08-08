@@ -4,6 +4,7 @@ import logging
 import os
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Chat
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -630,7 +631,7 @@ async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAUL
         )
         await update.message.reply_text(mensaje, parse_mode="HTML")
 
-def add_handlers(application):
+def add_handlers(application: Application):
     main_handler = ConversationHandler(
         entry_points=[
             CommandHandler('start', start_command, filters.ChatType.PRIVATE),
@@ -694,15 +695,11 @@ def add_handlers(application):
 
 # --- BLOQUE DEL WEBHOOK PARA RENDER ---
 app = Flask(__name__)
-# Instancia del bot de Telegram que se crea fuera del main
-application = ApplicationBuilder().token(BOT_TOKEN).build()
-add_handlers(application)
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 async def webhook():
     if request.method == "POST":
         data = request.get_json(force=True)
-        # print(f"Update received: {data}") # Línea de depuración que puedes eliminar
         update = Update.de_json(data, application.bot)
         await application.process_update(update)
         return 'ok'
@@ -714,6 +711,10 @@ def hello_world():
 
 if __name__ == '__main__':
     init_db()
+
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    add_handlers(application)
+    application.initialize()
 
     WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 

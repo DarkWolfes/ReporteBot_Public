@@ -19,7 +19,9 @@ from telegram.ext import (
 # ... (Todo tu código y funciones de los handlers aquí) ...
 # Asegúrate de que las variables como TOKEN, WEBHOOK_URL, etc., estén definidas.
 
-# ... (Definiciones de los handlers, ConversationHandler, etc.) ...
+# Define tu token aquí si ya lo tenías en el código
+TOKEN = "TU_TOKEN_AQUI"
+WEBHOOK_URL = "https://reportebot-public.onrender.com"
 
 # Esta es la corrutina que configura el webhook
 async def setup_webhook():
@@ -54,16 +56,12 @@ async def webhook_handler():
 def health_check():
     return "OK"
 
-# Este es el nuevo bloque de código para iniciar la aplicación.
+# Este es el nuevo bloque de código para ejecutar el webhook.
 # Se encarga de ejecutar el webhook en el mismo bucle de eventos que Uvicorn.
 # Esta es la parte crucial que corrige el error.
-async def run_setup():
-    await setup_webhook()
-    await application.updater.start_webhook()
-    await application.run_polling()
-
-# Aquí es donde se inicia el programa.
-if __name__ == '__main__':
-    # Usar un bucle de eventos para ejecutar todas las tareas asíncronas
+@app.before_first_request
+def run_webhook_setup():
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_setup())
+    loop.run_until_complete(setup_webhook())
+    
+# ... (resto del código de tu aplicación Flask) ...

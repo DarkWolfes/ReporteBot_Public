@@ -1,767 +1,490 @@
-import logging
+# -*- coding: utf-8 -*-
+
 import os
-import re
-from fastapi import FastAPI, Request, HTTPException
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, Chat, InlineKeyboardMarkup, InlineKeyboardButton, error
+import sys
+import logging
+import asyncio
+from dotenv import load_dotenv
+from google.cloud import firestore
+from firebase_admin import credentials, initialize_app
+from telegram import (
+    Update,
+    Bot,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    WebAppInfo,
+    MenuButtonWebApp,
+)
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
+    Updater,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
     filters,
     ConversationHandler,
     CallbackQueryHandler,
-    Application
+    ContextTypes,
 )
+from telegram import LabeledPrice, ShippingOption, ShippingQuery, ChosenInlineResult
 
-# Importamos la librería de Firestore
-from google.cloud import firestore
+from datetime import datetime, time, date, timedelta
+import pytz
+from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+import random
+import re
+from typing import Dict, List
+import string
+import json
 
-# Configuración del logging
+from fastapi import FastAPI, Request, HTTPException
+from contextlib import asynccontextmanager
+
+# Constantes de los estados del ConversationHandler
+REGISTER_NAME, REGISTER_EMAIL, REGISTER_BIRTHDAY, REGISTER_GENDER = range(4)
+REPORT_ISSUE, REPORT_DETAILS, REPORT_PHOTO, REPORT_LOCATION, REPORT_FINAL = range(5)
+REPORT_TYPE, REPORT_DATE, REPORT_TIME, REPORT_DESCRIPTION = range(4)
+MAIN_MENU, REPORT_MENU = range(2)
+ASK_LOCATION, GET_LOCATION = range(2)
+# Constantes del estado de la conversación para la creación de eventos
+EVENT_NAME, EVENT_DATE, EVENT_TIME, EVENT_LOCATION, EVENT_DESCRIPTION = range(5)
+# Estado del ConversationHandler para la encuesta
+POLL_QUESTION, POLL_OPTIONS = range(2)
+# Estado para la conversación de enviar un mensaje a todos los usuarios
+BROADCAST_MESSAGE = range(1)
+# Estado para el menú de administrador
+ADMIN_MENU, ADMIN_BROADCAST = range(2)
+# Estado para la conversación de feedback
+FEEDBACK_TEXT, FEEDBACK_CONFIRMATION = range(2)
+# Estado para la conversación de reporte de errores
+BUG_DESCRIPTION, BUG_REPRODUCE, BUG_CONTACT, BUG_CONFIRMATION = range(4)
+# Estado para la conversación de contacto
+CONTACT_NAME, CONTACT_EMAIL, CONTACT_MESSAGE, CONTACT_CONFIRMATION = range(4)
+# Estado para la conversación de suscripción
+SUBSCRIBE_CONFIRMATION = range(1)
+# Estado para la conversación de desuscripción
+UNSUBSCRIBE_CONFIRMATION = range(1)
+# Estado para la conversación de consulta de estado de reportes
+CHECK_STATUS_ID, CHECK_STATUS_CONFIRMATION = range(2)
+# Estado para la conversación de creación de eventos
+CREATE_EVENT_NAME, CREATE_EVENT_DATE, CREATE_EVENT_TIME, CREATE_EVENT_LOCATION, CREATE_EVENT_DESCRIPTION = range(5)
+# Estado para la conversación de encuestas
+POLL_QUESTION, POLL_OPTIONS_INPUT = range(2)
+# Estado para la conversación de recordatorios
+REMINDER_TEXT, REMINDER_DATE, REMINDER_TIME = range(3)
+# Estado para la conversación de webapps
+WEBAPP_START = range(1)
+
+# Cargar variables de entorno
+load_dotenv()
+
+# Configura las variables de entorno para FastAPI y PTB
+TOKEN = os.environ.get("TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+
+# Habilitar el registro
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Obtener variables de entorno
-BOT_TOKEN = os.getenv('TOKEN')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+# Instancia global de la aplicación de Telegram
+application = None
 
-# --- CONFIGURACIÓN DE ESTADOS DEL CONVERSATIONHANDLER ---
-MENU_STATE = 0
-ADMIN_MENU_STATE = 1
-GET_CHANNEL_ID_FROM_FORWARD = 2
-GET_ADMINS_IDS = 3
-GET_SPAMMER_USERNAME = 4
-GET_REPORT_DESCRIPTION = 5
-GET_REPORT_PHOTO = 6
-AWAITING_RECONFIG_CONFIRMATION = 8
+# --- CONFIGURACIÓN DE FIRESTORE ---
 
-# --- FUNCIONES DE BASE DE DATOS PARA FIRESTORE ---
 try:
+    if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+        cred = credentials.Certificate(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+    else:
+        cred = None
+        logger.info("Usando credenciales predeterminadas de la aplicación de Google.")
+
+    if not cred:
+        initialize_app()
+    else:
+        initialize_app(cred)
+
     db = firestore.Client()
     logger.info("Cliente de Firestore inicializado correctamente.")
 except Exception as e:
-    logger.error(f"Error al inicializar el cliente de Firestore: {e}")
-    db = None
+    logger.error(f"Error al inicializar Firestore: {e}")
+    sys.exit(1)
 
-def init_db():
-    # Firestore no necesita una función de inicialización de tablas.
-    # Las colecciones se crean automáticamente al escribir el primer documento.
-    logger.info("Firestore no requiere inicialización de la base de datos. Las colecciones se crean automáticamente.")
-    if db:
-        logger.info("Conexión con Firestore establecida.")
-    else:
-        logger.error("No se pudo conectar a Firestore.")
 
-def get_user_config(user_id):
-    if not db: return None
-    try:
-        doc_ref = db.collection('users_config').document(str(user_id))
-        doc = doc_ref.get()
-        if doc.exists:
-            config_data = doc.to_dict()
-            admin_ids_str = config_data.get('admin_ids', '')
-            return {
-                'channel_id': config_data.get('channel_id'),
-                'admin_ids': [int(id) for id in admin_ids_str.split(',')] if admin_ids_str else [],
-                'is_configured': config_data.get('is_configured', False)
-            }
-        return None
-    except Exception as e:
-        logger.error(f"Error al obtener la configuración del usuario en Firestore: {e}")
-        return None
+# --- FUNCIONES DE GESTIÓN DE USUARIOS Y REPORTES ---
 
-def save_user_config(user_id, channel_id, admin_ids, is_configured=True):
-    if not db: return
-    try:
-        admin_ids_str = ','.join(map(str, admin_ids))
-        doc_ref = db.collection('users_config').document(str(user_id))
-        doc_ref.set({
-            'channel_id': channel_id,
-            'admin_ids': admin_ids_str,
-            'is_configured': is_configured
-        })
-        logger.info(f"Configuración del usuario {user_id} guardada en Firestore.")
-    except Exception as e:
-        logger.error(f"Error al guardar la configuración del usuario en Firestore: {e}")
+async def get_user_data(user_id: int) -> Dict:
+    user_ref = db.collection('users').document(str(user_id))
+    user_doc = await asyncio.to_thread(user_ref.get)
+    return user_doc.to_dict() if user_doc.exists else None
 
-def delete_user_config(user_id):
-    if not db: return
-    try:
-        db.collection('users_config').document(str(user_id)).delete()
-        logger.info(f"Configuración del usuario {user_id} eliminada de Firestore.")
-    except Exception as e:
-        logger.error(f"Error al eliminar la configuración del usuario en Firestore: {e}")
+async def is_admin(user_id: int) -> bool:
+    user_data = await get_user_data(user_id)
+    return user_data and user_data.get('is_admin', False)
 
-def save_group_to_channel_map(group_id, channel_id, group_name):
-    if not db: return
-    try:
-        doc_ref = db.collection('group_to_channel_map').document(str(group_id))
-        doc_ref.set({
-            'channel_id': channel_id,
-            'group_name': group_name
-        })
-        logger.info(f"Mapeo de grupo {group_id} a canal {channel_id} guardado en Firestore.")
-    except Exception as e:
-        logger.error(f"Error al guardar el mapeo de grupo en Firestore: {e}")
+async def check_user_registered(user_id: int) -> bool:
+    user_ref = db.collection('users').document(str(user_id))
+    user_doc = await asyncio.to_thread(user_ref.get)
+    return user_doc.exists
 
-def delete_group_from_channel_map(group_id):
-    if not db: return
-    try:
-        db.collection('group_to_channel_map').document(str(group_id)).delete()
-        logger.info(f"Mapeo de grupo {group_id} eliminado de Firestore.")
-    except Exception as e:
-        logger.error(f"Error al eliminar el mapeo del grupo en Firestore: {e}")
+async def add_report_to_db(report_data: Dict, user_id: int):
+    reports_ref = db.collection('reports')
+    report_data['user_id'] = user_id
+    report_data['timestamp'] = datetime.now(pytz.timezone('Europe/Madrid'))
+    await asyncio.to_thread(reports_ref.add, report_data)
 
-def delete_groups_for_channel_id(channel_id):
-    if not db: return
-    try:
-        groups_to_delete = db.collection('group_to_channel_map').where('channel_id', '==', channel_id).stream()
-        for group in groups_to_delete:
-            group.reference.delete()
-        logger.info(f"Mapeos de grupos para el canal {channel_id} eliminados de Firestore.")
-    except Exception as e:
-        logger.error(f"Error al eliminar los grupos para el canal {channel_id} en Firestore: {e}")
+# --- HANDLERS DEL BOT Y LÓGICA DE CONVERSACIÓN ---
 
-def get_channel_id_from_group_id(group_id):
-    if not db: return None
-    try:
-        doc_ref = db.collection('group_to_channel_map').document(str(group_id))
-        doc = doc_ref.get()
-        if doc.exists:
-            return doc.to_dict().get('channel_id')
-        return None
-    except Exception as e:
-        logger.error(f"Error al obtener el ID del canal del grupo {group_id} en Firestore: {e}")
-        return None
-
-def get_groups_for_channel_id(channel_id):
-    if not db: return []
-    try:
-        groups = db.collection('group_to_channel_map').where('channel_id', '==', channel_id).stream()
-        return [(int(group.id), group.to_dict().get('group_name')) for group in groups]
-    except Exception as e:
-        logger.error(f"Error al obtener grupos para el canal {channel_id} en Firestore: {e}")
-        return []
-
-def is_admin(user_id):
-    config = get_user_config(user_id)
-    return config and user_id in config['admin_ids']
-
-# --- MANEJADORES DEL FLUJO PRINCIPAL Y MENÚS ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    if not user:
-        return ConversationHandler.END
-        
-    chat = update.effective_chat
-    if chat and chat.type in [Chat.GROUP, Chat.SUPERGROUP]:
-        await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un chat privado. Por favor, habla conmigo en privado.")
-        return ConversationHandler.END
+    user_id = update.effective_user.id
+    user_data = await get_user_data(user_id)
 
-    mensaje = (
-        "¡Hola! 👋\n\n"
-        "Este bot te ayuda a reportar usuarios molestos o a configurar tu propio sistema de reportes.\n\n"
-        "Para hacer un reporte, por favor, ve al grupo donde ocurrió el incidente y usa el comando <code>/reportar</code>."
-    )
-    
-    menu_opciones = [['¿Para qué sirve este bot?']]
-    menu_opciones.append(['Configurar mi bot']) 
-
-    if is_admin(user.id):
-        menu_opciones.append(['Herramientas de Administrador'])
-    
-    reply_markup = ReplyKeyboardMarkup(menu_opciones, resize_keyboard=True)
-    await update.message.reply_text(mensaje, reply_markup=reply_markup, parse_mode="HTML")
-    return MENU_STATE
-
-async def handle_about_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "ℹ️ El objetivo de este bot es que los usuarios puedan reportar de manera eficiente y centralizada a "
-        "aquellos que envían spam, mensajes ofensivos o tienen un comportamiento inadecuado en los grupos. "
-        "Con este bot, los reportes se envían a un canal específico para que tú y otros administradores puedan "
-        "revisarlos y tomar las medidas oportunas.",
-        parse_mode="HTML"
-    )
-    return MENU_STATE
-
-async def handle_admin_tools_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    if not user:
-        return ConversationHandler.END
-
-    if not is_admin(user.id):
-        await update.message.reply_text("❌ Esta función es solo para administradores.")
-        return MENU_STATE
-    
-    menu_opciones = [['Bot Info', 'Check Reports'], ['Volver']]
-    reply_markup = ReplyKeyboardMarkup(menu_opciones, resize_keyboard=True)
-    await update.message.reply_text(
-        "🛠️ **Menú de Herramientas de Administrador**\n\n"
-        "Elige una opción para gestionar la configuración y los reportes:",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-    return ADMIN_MENU_STATE
-
-async def handle_config_bot_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    if not user:
-        return ConversationHandler.END
-        
-    config = get_user_config(user.id)
-    if config and config['is_configured']:
-        keyboard = [[
-            InlineKeyboardButton("Sí, quiero reconfigurar", callback_data="reconfig_yes"),
-            InlineKeyboardButton("No, volver al menú", callback_data="reconfig_no")
-        ]]
+    if user_data:
+        await update.message.reply_text(
+            f"¡Hola de nuevo, {user_data.get('name')}! ¿En qué puedo ayudarte hoy?"
+        )
+    else:
+        keyboard = [
+            [InlineKeyboardButton("Registrarme", callback_data="register")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "⚠️ ¡Atención! Ya tienes un bot configurado. Si continúas, la configuración actual se sobrescribirá. ¿Estás seguro de que quieres hacerlo?",
+            "¡Hola! Bienvenido al bot de gestión de informes. Para usar todas las funciones, por favor, regístrate.",
             reply_markup=reply_markup
         )
-        return AWAITING_RECONFIG_CONFIRMATION
+    return MAIN_MENU
 
-    context.user_data['config_user_id'] = user.id
-
-    mensaje = (
-        "<b>Paso 1: Configurar canal de reportes</b>\n\n"
-        "Crea un canal de Telegram (público o privado) y añade este bot como **administrador**.\n"
-        "Luego, en el canal, reenvía cualquier mensaje del bot y pégalo aquí para que pueda obtener la ID del canal."
-    )
-    await update.message.reply_text(mensaje, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
-    return GET_CHANNEL_ID_FROM_FORWARD
-
-async def handle_reconfig_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def register_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    await query.edit_message_text("Genial, ¡vamos a registrarte! ¿Cuál es tu nombre?")
+    return REGISTER_NAME
 
-    if query.data == "reconfig_yes":
-        user_id = update.effective_user.id
-        current_config = get_user_config(user_id)
-        if current_config:
-            delete_groups_for_channel_id(current_config['channel_id'])
-        
-        delete_user_config(user_id)  
-        await query.edit_message_text(text="✅ Entendido. Iniciando la nueva configuración.")
-        
-        context.user_data['config_user_id'] = user_id
-        mensaje = (
-            "<b>Paso 1: Configurar canal de reportes</b>\n\n"
-            "Crea un canal de Telegram (público o privado) y añade este bot como **administrador**.\n"
-            "Luego, en el canal, reenvía cualquier mensaje del bot y pégalo aquí para que pueda obtener la ID del canal."
-        )
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=mensaje, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
-        return GET_CHANNEL_ID_FROM_FORWARD
-    elif query.data == "reconfig_no":
-        await query.edit_message_text(text="❌ Cancelado. Volviendo al menú principal.")
-        return await start_command(update, context)
+async def register_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name = update.message.text
+    context.user_data['name'] = name
+    await update.message.reply_text(f"¡Hola, {name}! Por favor, dime tu correo electrónico.")
+    return REGISTER_EMAIL
 
+async def register_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    email = update.message.text
+    context.user_data['email'] = email
+    
+    await asyncio.to_thread(db.collection('users').document(str(update.effective_user.id)).set, context.user_data)
+
+    await update.message.reply_text("¡Gracias! Tus datos han sido guardados.")
     return ConversationHandler.END
 
-async def get_channel_id_from_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    channel_id = None
-    text = update.message.text
-    if text:
-        match = re.search(r"c\/(-?\d+)\/(\d+)", text)
-        if match:
-            channel_id_str = match.group(1)
-            channel_id = f"-100{channel_id_str}"
-        elif re.match(r"^-?\d+$", text):
-            channel_id = text
+async def report_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Inicia la conversación para reportar un problema."""
+    await update.message.reply_text("Por favor, describe brevemente el problema que quieres reportar.")
+    return REPORT_DETAILS
 
-    if not channel_id:
-        await update.message.reply_text(
-            "❌ ¡Error! Por favor, asegúrate de que el mensaje que envías contiene un enlace de tu canal o el ID numérico."
-        )
-        return GET_CHANNEL_ID_FROM_FORWARD
-
-    config_user_id = context.user_data.get('config_user_id')
-    if not config_user_id:
-        await update.message.reply_text("❌ Ha ocurrido un error. Vuelve a empezar con el comando /start.")
-        return ConversationHandler.END
-
-    context.user_data['channel_id'] = channel_id
-
-    await context.bot.send_message(chat_id=config_user_id, text=
-        "✅ ¡Canal configurado correctamente!\n\n"
-        "<b>Paso 2: Definir administradores</b>\n\n"
-        "Ahora, por favor, dime quiénes son los administradores. Envía los IDs de usuario de cada administrador separados por comas.\n"
-        "Si no quieres añadir más administradores, escribe 'ninguno'. **Recuerda que tú, como creador, ya eres administrador.**"
-    )
-    return GET_ADMINS_IDS
-
-async def get_admins_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = context.user_data.get('config_user_id')
-    if not user_id:
-        return ConversationHandler.END
-        
-    channel_id = context.user_data['channel_id']
+async def report_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Guarda los detalles del reporte y finaliza."""
+    report = update.message.text
     
-    if update.message.text.lower() == 'ninguno':
-        admin_ids = [user_id]
-    else:
-        try:
-            admin_ids = [int(id.strip()) for id in update.message.text.split(',') if id.strip().isdigit()]
-            if user_id not in admin_ids:
-                admin_ids.append(user_id)
-        except ValueError:
-            await update.message.reply_text("❌ Formato de IDs incorrecto. Por favor, envía los IDs separados por comas (ejemplo: 12345, 67890). O escribe 'ninguno'.")
-            return GET_ADMINS_IDS
+    report_data = {'report_text': report}
+    await add_report_to_db(report_data, update.effective_user.id)
+    
+    await update.message.reply_text("Gracias por tu reporte. Lo revisaremos pronto.")
+    return ConversationHandler.END
 
-    save_user_config(user_id, str(channel_id), admin_ids)
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancela cualquier conversación en curso."""
+    await update.message.reply_text("Operación cancelada.")
+    return ConversationHandler.END
+
+async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await is_admin(update.effective_user.id):
+        await update.message.reply_text("No tienes permisos de administrador.")
+        return ConversationHandler.END
+
+    keyboard = [
+        [InlineKeyboardButton("Enviar mensaje a todos", callback_data="broadcast")],
+        [InlineKeyboardButton("Ver reportes", callback_data="view_reports")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Menú de administrador:", reply_markup=reply_markup)
+    return ADMIN_MENU
+
+async def admin_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Por favor, escribe el mensaje que quieres enviar a todos los usuarios.")
+    return ADMIN_BROADCAST
+
+async def admin_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message_to_send = update.message.text
+    users_ref = db.collection('users')
+    users_docs = await asyncio.to_thread(users_ref.stream)
+    
+    for user_doc in users_docs:
+        try:
+            await context.bot.send_message(chat_id=user_doc.id, text=message_to_send)
+        except Exception as e:
+            logger.error(f"Error al enviar mensaje a {user_doc.id}: {e}")
+
+    await update.message.reply_text("Mensaje enviado a todos los usuarios.")
+    return ConversationHandler.END
+
+async def ask_location_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_user_registered(update.effective_user.id):
+        await update.message.reply_text("Por favor, regístrate primero usando /start.")
+        return ConversationHandler.END
+
+    keyboard = [[KeyboardButton("Compartir mi ubicación", request_location=True)]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    await update.message.reply_text(
+        "Por favor, comparte tu ubicación para que pueda ayudarte a encontrar servicios cercanos.",
+        reply_markup=reply_markup
+    )
+    return GET_LOCATION
+
+async def get_location_and_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    location = update.message.location
+    latitud = location.latitude
+    longitud = location.longitude
+
+    await update.message.reply_text(
+        f"Tu ubicación es: Latitud {latitud}, Longitud {longitud}. Estoy buscando servicios cercanos...",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
+async def event_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Por favor, introduce el nombre del evento:")
+    return EVENT_NAME
+
+async def event_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    event_name_text = update.message.text
+    context.user_data['event_name'] = event_name_text
+    await update.message.reply_text("¿Cuál es la fecha del evento? (Ej: 2025-10-27)")
+    return EVENT_DATE
+
+async def event_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    event_date_text = update.message.text
+    context.user_data['event_date'] = event_date_text
+    await update.message.reply_text("¿A qué hora será el evento? (Ej: 18:30)")
+    return EVENT_TIME
+
+async def event_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    event_time_text = update.message.text
+    context.user_data['event_time'] = event_time_text
+    await update.message.reply_text("¿Dónde se celebrará el evento?")
+    return EVENT_LOCATION
+
+async def event_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    event_location_text = update.message.text
+    context.user_data['event_location'] = event_location_text
+    await update.message.reply_text("Por último, introduce una descripción del evento:")
+    return EVENT_DESCRIPTION
+
+async def create_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    description = update.message.text
+    context.user_data['event_description'] = description
+    
+    event_data = context.user_data
+    event_data['created_by'] = update.effective_user.id
+    await asyncio.to_thread(db.collection('events').add, event_data)
     
     await update.message.reply_text(
-        "🎉 ¡El bot ha sido configurado! Ahora, el **último paso** es enlazarlo a un grupo.\n\n"
-        "<b>Paso 3: Enlazar a un grupo</b>\n\n"
-        "Añade este bot a tu grupo y usa el comando <code>/configurar_aqui</code>. Cuando lo hagas, te enviaré una confirmación por aquí. ¡Te espero!",
-        parse_mode="HTML"
+        f"Evento '{event_data['event_name']}' creado con éxito. ¡Gracias!"
     )
-    return MENU_STATE
-
-async def handle_bot_info_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    if not user:
-        return ADMIN_MENU_STATE
-
-    if not is_admin(user.id):
-        await update.message.reply_text("❌ Este comando solo puede ser usado por los administradores.")
-        return ADMIN_MENU_STATE
-        
-    config = get_user_config(user.id)
-    if not config or not config['is_configured']:
-        await update.message.reply_text("⚠️ El bot no está configurado. Por favor, usa /start para iniciar la configuración.")
-        return ADMIN_MENU_STATE
-
-    admin_list_str = ', '.join([str(admin_id) for admin_id in config['admin_ids']])
-    
-    groups = get_groups_for_channel_id(config['channel_id'])
-    if groups:
-        groups_list = "\n".join([f"- {name} (ID: <code>{gid}</code>)" for gid, name in groups])
-    else:
-        groups_list = "No hay grupos asociados a este canal de reportes."
-    
-    mensaje = (
-        "<b>Bot Info (Solo para administradores)</b>\n\n"
-        f"<b>ID del canal de reportes:</b> <code>{config['channel_id']}</code>\n"
-        f"<b>IDs de administradores:</b> <code>{admin_list_str}</code>\n\n"
-        "<b>Grupos enlazados a este canal:</b>\n"
-        f"{groups_list}\n\n"
-        "<b>Para enlazar un grupo:</b>\n"
-        "1. Añade este bot al grupo.\n"
-        "2. En el grupo, usa el comando <code>/configurar_aqui</code>.\n\n"
-        "<b>Para desvincular un grupo:</b>\n"
-        "1. Ve al grupo que quieres desvincular.\n"
-        "2. Usa el comando <code>/desconfigurar_aqui</code>."
-    )
-    await update.message.reply_text(mensaje, parse_mode="HTML")
-    return ADMIN_MENU_STATE
-
-async def handle_check_reports_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    if not user:
-        return ADMIN_MENU_STATE
-
-    if not is_admin(user.id):
-        await update.message.reply_text("❌ Este comando solo puede ser usado por los administradores.")
-        return ADMIN_MENU_STATE
-
-    await update.message.reply_text("✅ No hay reportes nuevos que requieran tu atención en este momento.")
-    return ADMIN_MENU_STATE
-
-async def handle_back_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    return await start_command(update, context)
-
-async def cancel_any_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("❌ Proceso cancelado.", reply_markup=ReplyKeyboardRemove())
-    if 'report_data' in context.user_data:
-        del context.user_data['report_data']
     return ConversationHandler.END
 
-# --- FLUJO DE REPORTE GUIADO (NUEVA VERSIÓN) ---
-async def start_report_from_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
-    
-    if not user or not chat or chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
-        return ConversationHandler.END
+async def start_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("¿Cuál es la pregunta de la encuesta?")
+    return POLL_QUESTION
 
-    group_id = chat.id
-    group_name = chat.title
-    channel_id = get_channel_id_from_group_id(group_id)
-    
-    if not channel_id:
-        await context.bot.send_message(chat_id=chat.id, text=f"❌ El grupo '{group_name}' no está enlazado a ningún canal de reportes. Por favor, pide a un administrador que use el comando /configurar_aqui.")
-        return ConversationHandler.END
+async def poll_options_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    question = update.message.text
+    context.user_data['poll_question'] = question
+    await update.message.reply_text("Ahora, introduce las opciones de la encuesta separadas por comas.")
+    return POLL_OPTIONS_INPUT
 
-    try:
-        await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-    except Exception as e:
-        logging.info(f"No se pudo borrar el mensaje del comando /reportar. Posiblemente no tenga los permisos: {e}")
-
-    context.user_data['report_data'] = {'group_name': group_name, 'group_id': group_id, 'channel_id': channel_id}
+async def create_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    options_text = update.message.text
+    options = [opt.strip() for opt in options_text.split(',')]
     
-    keyboard = [[InlineKeyboardButton("Iniciar Reporte", callback_data="start_report")]]
+    await context.bot.send_poll(
+        chat_id=update.effective_chat.id,
+        question=context.user_data['poll_question'],
+        options=options,
+        is_anonymous=False
+    )
+    await update.message.reply_text("Encuesta creada con éxito.")
+    return ConversationHandler.END
+
+async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Por favor, escribe el mensaje que quieres enviar a todos los usuarios:")
+    return BROADCAST_MESSAGE
+
+async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message_to_send = update.message.text
+    users_ref = db.collection('users')
+    users_docs = await asyncio.to_thread(users_ref.stream)
+    
+    for user_doc in users_docs:
+        try:
+            await context.bot.send_message(chat_id=user_doc.id, text=message_to_send)
+        except Exception as e:
+            logger.error(f"Error al enviar mensaje a {user_doc.id}: {e}")
+            
+    await update.message.reply_text("Mensaje enviado a todos los usuarios.")
+    return ConversationHandler.END
+
+async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    is_registered = await check_user_registered(user_id)
+    
+    if not is_registered:
+        keyboard = [[InlineKeyboardButton("Registrarme", callback_data="register")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("Por favor, regístrate para acceder a las funciones.", reply_markup=reply_markup)
+        return MAIN_MENU
+
+    keyboard = [
+        [InlineKeyboardButton("Reportar Incidencia", callback_data="report_menu")],
+        [InlineKeyboardButton("Consultar Estado", callback_data="check_status")],
+    ]
+    if await is_admin(user_id):
+        keyboard.append([InlineKeyboardButton("Panel de Administrador", callback_data="admin_menu")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Elige una opción del menú principal:", reply_markup=reply_markup)
+    return MAIN_MENU
 
-    await context.bot.send_message(
-        chat_id=user.id, 
-        text=f"✅ He detectado que quieres hacer un reporte desde el grupo **{group_name}**.\n\n"
-             f"Presiona el botón de abajo para continuar con el proceso de reporte.", 
-        parse_mode="HTML",
-        reply_markup=reply_markup
-    )
-    return ConversationHandler.END
-
-async def start_private_report_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def report_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-
-    if 'report_data' not in context.user_data:
-        await query.edit_message_text("❌ No he detectado un reporte activo. Por favor, usa el comando /reportar en el grupo para iniciar el proceso.")
-        return ConversationHandler.END
-        
-    await query.edit_message_text("Ahora, por favor, introduce el nombre de usuario de la persona que quieres reportar (ej: @usuario_spam o simplemente un nombre).")
-    return GET_SPAMMER_USERNAME
-
-async def get_spammer_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    username = update.message.text
     
-    if not username:
-        await update.message.reply_text("❌ El nombre de usuario no puede estar vacío. Por favor, escribe un nombre de usuario.")
-        return GET_SPAMMER_USERNAME
-    
-    report_data = context.user_data.get('report_data', {})
-    report_data['spammer_username'] = username
-    context.user_data['report_data'] = report_data
-    
-    await update.message.reply_text("Ahora, escribe una breve descripción de lo sucedido.")
-    return GET_REPORT_DESCRIPTION
-
-async def get_report_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    description = update.message.text
-    if not description:
-        await update.message.reply_text("❌ La descripción no puede estar vacía. Por favor, escribe una breve descripción.")
-        return GET_REPORT_DESCRIPTION
-
-    report_data = context.user_data.get('report_data', {})
-    report_data['description'] = description
-    context.user_data['report_data'] = report_data
-
-    await update.message.reply_text("Por último, por favor, envía una captura de pantalla del incidente. Debe ser una foto, no un archivo.")
-    return GET_REPORT_PHOTO
-
-async def process_guided_report_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    report_data = context.user_data.get('report_data')
-
-    if update.message.photo and report_data:
-        spammer_username = report_data.get('spammer_username', 'desconocido')
-        description = report_data.get('description', 'sin descripción')
-        group_name = report_data.get('group_name', 'desconocido')
-        channel_id = report_data.get('channel_id')
-        group_id = report_data.get('group_id')
-        
-        photo = update.message.photo[-1]
-
-        reporter_username = user.username or "sin nombre de usuario"
-        reporter_fullname = user.full_name or "sin nombre"
-        
-        caption = (
-            f"📣 <b>Nuevo reporte recibido:</b>\n\n"
-            f"<b>Reporte enviado por:</b> @{reporter_username} (ID: <code>{user.id}</code>)\n"
-            f"<b>Nombre:</b> {reporter_fullname}\n\n"
-            f"<b>Usuario reportado:</b> {spammer_username}\n"
-            f"<b>Grupo de origen:</b> {group_name} (ID: <code>{group_id}</code>)\n\n"
-            f"<b>Descripción:</b>\n{description}"
-        )
-        
-        await send_report_with_buttons(
-            context,
-            channel_id,
-            photo.file_id,
-            caption,
-            group_id,
-            spammer_username,
-            user.id
-        )
-
-        await update.message.reply_text("✅ Tu reporte ha sido registrado correctamente. Gracias por tu colaboración.")
-    else:
-        await update.message.reply_text("❌ Hubo un error en el reporte. Por favor, inténtalo de nuevo con el comando /reportar en el grupo.")
-    
-    if 'report_data' in context.user_data:
-        del context.user_data['report_data']
-    return ConversationHandler.END
-
-# --- FUNCIONES ADICIONALES ---
-async def send_report_with_buttons(context: ContextTypes.DEFAULT_TYPE, channel_id: str, photo_file_id: str, caption: str, group_id: int, spammer_username: str, reporter_id: int):
-    """Envía el reporte a los administradores con el botón de adjudicar."""
-    keyboard = [[InlineKeyboardButton("Adjudicar ✅", callback_data=f"adjudicar|{group_id}|{spammer_username}|{reporter_id}")]]
+    keyboard = [
+        [InlineKeyboardButton("Describir Incidencia", callback_data="start_report")],
+        [InlineKeyboardButton("Adjuntar Foto", callback_data="attach_photo")],
+        [InlineKeyboardButton("Compartir Ubicación", callback_data="share_location")],
+        [InlineKeyboardButton("Volver al Menú Principal", callback_data="main_menu")],
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_photo(
-        chat_id=channel_id,
-        photo=photo_file_id,
-        caption=caption,
-        parse_mode="HTML",
-        reply_markup=reply_markup
-    )
+    await query.edit_message_text("Elige una opción para tu reporte:", reply_markup=reply_markup)
+    return REPORT_MENU
 
-async def handle_report_action_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Maneja las acciones del botón de adjudicar en el mensaje de reporte."""
-    query = update.callback_query
-    await query.answer()
+# --- CONFIGURACIÓN DE FASTAPI Y LIFESPAN ---
 
-    action, group_id_str, spammer_username, reporter_id_str = query.data.split('|')
-    reporter_id = int(reporter_id_str)
-    admin_user = update.effective_user
-    
-    if not is_admin(admin_user.id):
-        await query.message.reply_text("❌ Solo un administrador puede tomar acciones sobre este reporte.")
-        return
-
-    original_caption = query.message.caption
-    
-    if action == 'adjudicar':
-        new_caption = f"{original_caption}\n\n<b>Adjudicado por:</b> @{admin_user.username} ✅"
-        try:
-            await query.edit_message_caption(caption=new_caption, parse_mode="HTML", reply_markup=None)
-            
-            await context.bot.send_message(
-                chat_id=reporter_id,
-                text="✅ Tu reporte está siendo tratado por un administrador. Si lo consideran necesario, uno de los administradores se pondrá en contacto contigo."
-            )
-            
-        except Exception as e:
-            logging.error(f"Error al editar el mensaje de reporte: {e}")
-
-# --- MANEJADORES DE COMANDOS DE ADMINISTRADORES EN GRUPO---
-async def configure_group_in_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
-
-    if not user or not chat:
-        return
-
-    # Borra el mensaje del comando
-    try:
-        await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-    except Exception as e:
-        logging.info(f"No se pudo borrar el mensaje del comando /configurar_aqui: {e}")
-
-    if chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
-        await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un grupo.")
-        return
-
-    if not is_admin(user.id):
-        await context.bot.send_message(chat_id=chat.id, text="❌ Solo un administrador puede usar este comando.")
-        return
-
-    user_config = get_user_config(user.id)
-    if not user_config or not user_config['is_configured']:
-        await context.bot.send_message(chat_id=chat.id, text="❌ Tu bot no está configurado. Por favor, usa /start en privado para configurarlo primero.")
-        return
-    
-    save_group_to_channel_map(chat.id, user_config['channel_id'], chat.title)
-    
-    await context.bot.send_message(chat_id=chat.id, text=
-        f"✅ ¡Grupo '{chat.title}' configurado! Los reportes de este grupo se enviarán al canal de reportes asociado a tu cuenta."
-    )
-    await context.bot.send_message(chat_id=user.id, text=
-        f"🎉 **¡Configuración completa!**\n\n"
-        f"El grupo '{chat.title}' (ID: <code>{chat.id}</code>) ha sido enlazado a tu canal de reportes.\n\n"
-        "Ahora los miembros de ese grupo pueden usar el bot para reportar incidentes.",
-        parse_mode="HTML"
-    )
-
-async def unconfigure_group_in_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
-
-    if not user or not chat:
-        return
-
-    # Borra el mensaje del comando
-    try:
-        await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-    except Exception as e:
-        logging.info(f"No se pudo borrar el mensaje del comando /desconfigurar_aqui: {e}")
-    
-    if chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
-        await context.bot.send_message(chat_id=chat.id, text="❌ Este comando solo puede ser usado en un grupo.")
-        return
-
-    if not is_admin(user.id):
-        await context.bot.send_message(chat_id=chat.id, text="❌ Solo un administrador puede usar este comando.")
-        return
-
-    if not get_channel_id_from_group_id(chat.id):
-        await context.bot.send_message(chat_id=chat.id, text=f"⚠️ El grupo '{chat.title}' no está configurado, no hay nada que desvincular.")
-        return
-        
-    delete_group_from_channel_map(chat.id)
-
-    await context.bot.send_message(chat_id=chat.id, text=
-        f"✅ ¡Grupo '{chat.title}' desvinculado! Los reportes de este grupo ya no se enviarán a tu canal."
-    )
-    await context.bot.send_message(chat_id=user.id, text=
-        f"❌ El grupo '{chat.title}' (ID: <code>{chat.id}</code>) ha sido desvinculado de tu canal de reportes.",
-        parse_mode="HTML"
-    )
-
-# --- NUEVO COMANDO DE AYUDA UNIFICADO ---
-async def ayuda_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
-
-    if not user or not chat:
-        return
-
-    if chat.type in [Chat.GROUP, Chat.SUPERGROUP]:
-        try:
-            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-        except Exception as e:
-            logging.info(f"No se pudo borrar el mensaje del comando /ayuda: {e}")
-
-    help_text = (
-        "<b>Comandos disponibles</b>\n\n"
-        " • <code>/start</code> - Inicia una conversación con el bot en privado.\n"
-        " • <code>/reportar</code> - Inicia el proceso para reportar a un usuario.\n"
-        " • <code>/ayuda</code> - Muestra esta lista de comandos.\n\n"
-        "<b>Comandos de administración (Solo admins)</b>\n\n"
-        " • <code>/configurar_aqui</code> - Enlaza este grupo a tu canal de reportes.\n"
-        " • <code>/desconfigurar_aqui</code> - Desvincula este grupo de tu canal de reportes."
-    )
-
-    if chat.type == Chat.PRIVATE:
-        await update.message.reply_text(help_text, parse_mode="HTML")
-    else:
-        await context.bot.send_message(chat_id=chat.id, text=help_text, parse_mode="HTML")
-
-# --- MANEJADORES GENÉRICOS ---
-async def handle_unhandled_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        return
-    
-    if update.effective_chat.type == Chat.PRIVATE:
-        mensaje = (
-            "❌ Lo siento, no te entiendo. Si quieres hacer un reporte, ve al grupo donde ocurrió el problema y usa el comando <code>/reportar</code>."
-            "Si necesitas ayuda con otra cosa, usa el comando /start."
-        )
-        await update.message.reply_text(mensaje, parse_mode="HTML")
-
-# --- CONSTRUCCIÓN DE LA APLICACIÓN Y FASTAPI ---
-init_db()
-
-# Inicializamos la aplicación del bot de forma global, pero la configuramos en un evento de inicio.
-application = None
-app = FastAPI()
-
-async def create_app():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Función de lifespan para FastAPI. Se ejecuta al iniciar la app.
+    Aquí inicializamos el bot y configuramos el webhook.
+    """
     global application
-    
-    if not BOT_TOKEN or not WEBHOOK_URL:
-        logger.error("No se pudo iniciar la aplicación: TOKEN o WEBHOOK_URL no están configurados.")
-        raise HTTPException(status_code=500, detail="Configuración de entorno incompleta.")
-
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Definimos los handlers para la aplicación del bot
-    main_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler('start', start_command, filters.ChatType.PRIVATE),
-        ],
-        states={
-            MENU_STATE: [
-                MessageHandler(filters.Regex('^¿Para qué sirve este bot?.*$'), handle_about_button),
-                MessageHandler(filters.Regex('^Configurar mi bot$'), handle_config_bot_button),
-                MessageHandler(filters.Regex('^Herramientas de Administrador$'), handle_admin_tools_button),
-            ],
-            ADMIN_MENU_STATE: [
-                MessageHandler(filters.Regex('^Bot Info$'), handle_bot_info_button),
-                MessageHandler(filters.Regex('^Check Reports$'), handle_check_reports_button),
-                MessageHandler(filters.Regex('^Volver$'), handle_back_button),
-            ],
-            GET_CHANNEL_ID_FROM_FORWARD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel_id_from_forward)
-            ],
-            GET_ADMINS_IDS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, get_admins_ids)
-            ],
-            AWAITING_RECONFIG_CONFIRMATION: [
-                CallbackQueryHandler(handle_reconfig_confirmation),
-                MessageHandler(filters.Regex('^¿Para qué sirve este bot?.*$'), handle_about_button),
-                MessageHandler(filters.Regex('^Herramientas de Administrador$'), handle_admin_tools_button),
-            ],
-        },
-        fallbacks=[CommandHandler('cancel', cancel_any_flow)],
-        allow_reentry=True,
-    )
-
-    report_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(start_private_report_from_button, pattern="^start_report$")
-        ],
-        states={
-            GET_SPAMMER_USERNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, get_spammer_username)
-            ],
-            GET_REPORT_DESCRIPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, get_report_description)
-            ],
-            GET_REPORT_PHOTO: [
-                MessageHandler(filters.PHOTO, process_guided_report_photo)
-            ],
-        },
-        fallbacks=[CommandHandler('cancel', cancel_any_flow)],
-        allow_reentry=True,
-    )
-
-    application.add_handler(main_handler)
-    application.add_handler(report_handler)
-    application.add_handler(CallbackQueryHandler(handle_report_action_button))
-    application.add_handler(CommandHandler('configurar_aqui', configure_group_in_group))
-    application.add_handler(CommandHandler('desconfigurar_aqui', unconfigure_group_in_group))
-    application.add_handler(CommandHandler('reportar', start_report_from_group_command, filters.ChatType.GROUPS))
-    application.add_handler(CommandHandler('ayuda', ayuda_command))
-    application.add_handler(MessageHandler(filters.ALL, handle_unhandled_messages))
-    
-    await application.initialize()
-    logger.info("Aplicación del bot de Telegram inicializada.")
-    
+    logger.info("Iniciando aplicación FastAPI...")
     try:
-        await application.bot.set_webhook(url=WEBHOOK_URL)
-    except error.TelegramError as e:
-        logger.error(f"Error al configurar el webhook: {e}")
-    except Exception as e:
-        logger.error(f"Error inesperado al configurar el webhook: {e}")
-    
+        application = ApplicationBuilder().token(TOKEN).updater(None).build()
 
-# --- Rutas de FastAPI ---
-@app.post(f"/{BOT_TOKEN}")
+        # Carga todos los manejadores del bot
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CallbackQueryHandler(register_callback, pattern='^register$'))
+        
+        # Handlers de conversación
+        register_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(register_callback, pattern='^register$')],
+            states={
+                REGISTER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_name)],
+                REGISTER_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_email)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(register_handler)
+
+        report_handler = ConversationHandler(
+            entry_points=[CommandHandler('report', report_start)],
+            states={
+                REPORT_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_details)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(report_handler)
+
+        admin_handler = ConversationHandler(
+            entry_points=[CommandHandler('admin', admin_start)],
+            states={
+                ADMIN_MENU: [CallbackQueryHandler(admin_broadcast_callback, pattern='^broadcast$')],
+                ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_message)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(admin_handler)
+
+        location_handler = ConversationHandler(
+            entry_points=[CommandHandler('location', ask_location_start)],
+            states={
+                GET_LOCATION: [MessageHandler(filters.LOCATION, get_location_and_search)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(location_handler)
+
+        event_handler = ConversationHandler(
+            entry_points=[CommandHandler('create_event', event_name)],
+            states={
+                EVENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_date)],
+                EVENT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_time)],
+                EVENT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_location)],
+                EVENT_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_description)],
+                EVENT_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_event)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(event_handler)
+
+        poll_handler = ConversationHandler(
+            entry_points=[CommandHandler('poll', start_poll)],
+            states={
+                POLL_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, poll_options_input)],
+                POLL_OPTIONS_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_poll)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(poll_handler)
+
+        logger.info("Manejadores del bot cargados.")
+
+        # Establece la URL del webhook en Telegram
+        await application.bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"Webhook configurado en la URL: {WEBHOOK_URL}")
+
+        yield
+    except Exception as e:
+        logger.error(f"Error durante la inicialización de la aplicación: {e}")
+        sys.exit(1)
+    finally:
+        logger.info("Apagando aplicación FastAPI...")
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/")
 async def webhook_handler(request: Request):
-    if not application:
-        logger.error("La aplicación no se ha inicializado.")
-        raise HTTPException(status_code=500, detail="La aplicación no se ha inicializado.")
-    
+    global application
+    if application is None:
+        logger.error("La aplicación de Telegram no se ha inicializado.")
+        raise HTTPException(status_code=500, detail="Bot application not initialized.")
+        
     try:
         data = await request.json()
         update = Update.de_json(data, application.bot)
         await application.process_update(update)
+
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"Error en el handler de webhook: {e}")
-        return {"status": "error", "message": str(e)}, 500
-
-@app.get("/")
-def health_check():
-    return "OK"
+        logger.error(f"Error al procesar la actualización: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("startup")
 async def startup_event():
-    await create_app()
+    logger.info("Servidor FastAPI iniciado.")
+    # El webhook se configura en el lifespan, no es necesario aquí
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -769,3 +492,483 @@ async def shutdown_event():
         await application.stop()
         logger.info("Aplicación del bot de Telegram detenida.")
 
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)
+
+# Aquí empieza el resto del código que faltaba
+# --- Funciones de soporte para el bot ---
+
+def generate_random_id():
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+
+# --- Handlers adicionales ---
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Aquí tienes una lista de comandos y funciones que puedo realizar:\n\n"
+                                    "/start - Iniciar el bot y ver el menú principal.\n"
+                                    "/register - Iniciar el proceso de registro.\n"
+                                    "/report - Iniciar el proceso de reporte de una incidencia.\n"
+                                    "/location - Compartir tu ubicación.\n"
+                                    "/create_event - Crear un evento.\n"
+                                    "/poll - Crear una encuesta.\n"
+                                    "/feedback - Enviar feedback.\n"
+                                    "/bug - Reportar un error.\n"
+                                    "/contact - Contactar con el soporte.\n"
+                                    "/subscribe - Suscribirse a notificaciones.\n"
+                                    "/unsubscribe - Darse de baja de notificaciones.\n"
+                                    "/check_status - Consultar el estado de un reporte.\n"
+                                    "/admin - Acceder al panel de administrador (solo para administradores).\n"
+                                    "/help - Mostrar esta ayuda.")
+    logger.info(f"Comando /help recibido de {update.effective_user.id}")
+
+async def feedback_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_user_registered(update.effective_user.id):
+        await update.message.reply_text("Por favor, regístrate primero usando /start.")
+        return ConversationHandler.END
+
+    await update.message.reply_text("Por favor, escribe tu feedback o sugerencia.")
+    return FEEDBACK_TEXT
+
+async def feedback_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    feedback = update.message.text
+    context.user_data['feedback_text'] = feedback
+    
+    keyboard = [[InlineKeyboardButton("Confirmar", callback_data="confirm_feedback")],
+                [InlineKeyboardButton("Cancelar", callback_data="cancel_feedback")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"Tu feedback es: \n\n'{feedback}'\n\n¿Quieres enviarlo?",
+        reply_markup=reply_markup
+    )
+    return FEEDBACK_CONFIRMATION
+
+async def confirm_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    feedback_data = {
+        'user_id': query.from_user.id,
+        'feedback': context.user_data['feedback_text'],
+        'timestamp': datetime.now(pytz.timezone('Europe/Madrid'))
+    }
+    await asyncio.to_thread(db.collection('feedback').add, feedback_data)
+    
+    await query.edit_message_text("¡Gracias por tu feedback! Ha sido enviado con éxito.")
+    return ConversationHandler.END
+
+async def cancel_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Envío de feedback cancelado.")
+    return ConversationHandler.END
+
+async def bug_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_user_registered(update.effective_user.id):
+        await update.message.reply_text("Por favor, regístrate primero usando /start.")
+        return ConversationHandler.END
+
+    await update.message.reply_text("Por favor, describe el error que has encontrado.")
+    return BUG_DESCRIPTION
+
+async def bug_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    description = update.message.text
+    context.user_data['bug_description'] = description
+    await update.message.reply_text("¿Cómo podemos reproducir este error?")
+    return BUG_REPRODUCE
+
+async def bug_reproduce(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    reproduce = update.message.text
+    context.user_data['bug_reproduce'] = reproduce
+    await update.message.reply_text("¿Podrías proporcionar un correo electrónico para que podamos contactarte si es necesario?")
+    return BUG_CONTACT
+
+async def bug_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    contact_email = update.message.text
+    context.user_data['bug_contact'] = contact_email
+    
+    bug_data = context.user_data
+    bug_data['user_id'] = update.effective_user.id
+    bug_data['timestamp'] = datetime.now(pytz.timezone('Europe/Madrid'))
+
+    keyboard = [[InlineKeyboardButton("Confirmar", callback_data="confirm_bug")],
+                [InlineKeyboardButton("Cancelar", callback_data="cancel_bug")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"¿Quieres enviar este reporte de error?\n\nDescripción: {bug_data['bug_description']}\nReproducción: {bug_data['bug_reproduce']}\nContacto: {bug_data['bug_contact']}",
+        reply_markup=reply_markup
+    )
+    return BUG_CONFIRMATION
+
+async def confirm_bug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    bug_data = context.user_data
+    bug_data['user_id'] = query.from_user.id
+    bug_data['timestamp'] = datetime.now(pytz.timezone('Europe/Madrid'))
+    
+    await asyncio.to_thread(db.collection('bugs').add, bug_data)
+    
+    await query.edit_message_text("¡Gracias por tu reporte de error! Ha sido enviado con éxito.")
+    return ConversationHandler.END
+
+async def cancel_bug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Reporte de error cancelado.")
+    return ConversationHandler.END
+
+async def contact_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_user_registered(update.effective_user.id):
+        await update.message.reply_text("Por favor, regístrate primero usando /start.")
+        return ConversationHandler.END
+
+    await update.message.reply_text("Por favor, introduce tu nombre completo.")
+    return CONTACT_NAME
+
+async def contact_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name = update.message.text
+    context.user_data['contact_name'] = name
+    await update.message.reply_text("Ahora, tu correo electrónico.")
+    return CONTACT_EMAIL
+
+async def contact_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    email = update.message.text
+    context.user_data['contact_email'] = email
+    await update.message.reply_text("Por último, escribe el mensaje que quieres enviar.")
+    return CONTACT_MESSAGE
+
+async def contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.message.text
+    context.user_data['contact_message'] = message
+    
+    contact_data = context.user_data
+    contact_data['user_id'] = update.effective_user.id
+    contact_data['timestamp'] = datetime.now(pytz.timezone('Europe/Madrid'))
+
+    keyboard = [[InlineKeyboardButton("Confirmar", callback_data="confirm_contact")],
+                [InlineKeyboardButton("Cancelar", callback_data="cancel_contact")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"¿Quieres enviar este mensaje de contacto?\n\nNombre: {contact_data['contact_name']}\nEmail: {contact_data['contact_email']}\nMensaje: {contact_data['contact_message']}",
+        reply_markup=reply_markup
+    )
+    return CONTACT_CONFIRMATION
+
+async def confirm_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    contact_data = context.user_data
+    contact_data['user_id'] = query.from_user.id
+    contact_data['timestamp'] = datetime.now(pytz.timezone('Europe/Madrid'))
+    
+    await asyncio.to_thread(db.collection('contact_messages').add, contact_data)
+    
+    await query.edit_message_text("¡Gracias por contactarnos! Tu mensaje ha sido enviado con éxito.")
+    return ConversationHandler.END
+
+async def cancel_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Envío de contacto cancelado.")
+    return ConversationHandler.END
+
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    user_ref = db.collection('users').document(str(user_id))
+    user_doc = await asyncio.to_thread(user_ref.get)
+    
+    if user_doc.exists:
+        if user_doc.get('subscribed', False):
+            await update.message.reply_text("Ya estás suscrito a las notificaciones.")
+            return ConversationHandler.END
+        else:
+            keyboard = [[InlineKeyboardButton("Sí", callback_data="confirm_subscribe")],
+                        [InlineKeyboardButton("No", callback_data="cancel_subscribe")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text("¿Quieres suscribirte a las notificaciones?", reply_markup=reply_markup)
+            return SUBSCRIBE_CONFIRMATION
+    else:
+        await update.message.reply_text("Por favor, regístrate primero usando /start.")
+        return ConversationHandler.END
+
+async def confirm_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    user_ref = db.collection('users').document(str(query.from_user.id))
+    await asyncio.to_thread(user_ref.update, {'subscribed': True})
+    
+    await query.edit_message_text("¡Te has suscrito a las notificaciones con éxito!")
+    return ConversationHandler.END
+
+async def cancel_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Suscripción cancelada.")
+    return ConversationHandler.END
+
+async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    user_ref = db.collection('users').document(str(user_id))
+    user_doc = await asyncio.to_thread(user_ref.get)
+    
+    if user_doc.exists:
+        if not user_doc.get('subscribed', False):
+            await update.message.reply_text("No estás suscrito a las notificaciones.")
+            return ConversationHandler.END
+        else:
+            keyboard = [[InlineKeyboardButton("Sí", callback_data="confirm_unsubscribe")],
+                        [InlineKeyboardButton("No", callback_data="cancel_unsubscribe")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text("¿Quieres darte de baja de las notificaciones?", reply_markup=reply_markup)
+            return UNSUBSCRIBE_CONFIRMATION
+    else:
+        await update.message.reply_text("Por favor, regístrate primero usando /start.")
+        return ConversationHandler.END
+
+async def confirm_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    user_ref = db.collection('users').document(str(query.from_user.id))
+    await asyncio.to_thread(user_ref.update, {'subscribed': False})
+    
+    await query.edit_message_text("Te has dado de baja de las notificaciones con éxito.")
+    return ConversationHandler.END
+
+async def cancel_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Desuscripción cancelada.")
+    return ConversationHandler.END
+
+async def check_status_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_user_registered(update.effective_user.id):
+        await update.message.reply_text("Por favor, regístrate primero usando /start.")
+        return ConversationHandler.END
+
+    await update.message.reply_text("Por favor, introduce el ID del reporte que quieres consultar.")
+    return CHECK_STATUS_ID
+
+async def check_status_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    report_id = update.message.text
+    report_ref = db.collection('reports').document(report_id)
+    report_doc = await asyncio.to_thread(report_ref.get)
+    
+    if report_doc.exists and report_doc.get('user_id') == update.effective_user.id:
+        report_data = report_doc.to_dict()
+        status = report_data.get('status', 'Pendiente')
+        await update.message.reply_text(f"El estado de tu reporte con ID '{report_id}' es: {status}")
+    else:
+        await update.message.reply_text("No se encontró ningún reporte con ese ID o no tienes permisos para consultarlo.")
+        
+    return ConversationHandler.END
+
+async def webapp_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await check_user_registered(update.effective_user.id):
+        await update.message.reply_text("Por favor, regístrate primero usando /start.")
+        return
+    
+    keyboard = [[KeyboardButton("Abrir Web App", web_app=WebAppInfo(url="https://ejemplo.com"))]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    await update.message.reply_text("Haz clic en el botón para abrir la Web App.", reply_markup=reply_markup)
+
+# --- CONFIGURACIÓN DE FASTAPI Y HANDLERS ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Función de lifespan para FastAPI. Se ejecuta al iniciar la app.
+    Aquí inicializamos el bot y configuramos el webhook.
+    """
+    global application
+    logger.info("Iniciando aplicación FastAPI...")
+    try:
+        application = ApplicationBuilder().token(TOKEN).updater(None).build()
+        
+        # Carga todos los manejadores del bot
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CallbackQueryHandler(register_callback, pattern='^register$'))
+        
+        # Handlers de conversación
+        register_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(register_callback, pattern='^register$')],
+            states={
+                REGISTER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_name)],
+                REGISTER_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_email)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(register_handler)
+
+        report_handler = ConversationHandler(
+            entry_points=[CommandHandler('report', report_start)],
+            states={
+                REPORT_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, report_details)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(report_handler)
+
+        admin_handler = ConversationHandler(
+            entry_points=[CommandHandler('admin', admin_start)],
+            states={
+                ADMIN_MENU: [CallbackQueryHandler(admin_broadcast_callback, pattern='^broadcast$')],
+                ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_message)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(admin_handler)
+
+        location_handler = ConversationHandler(
+            entry_points=[CommandHandler('location', ask_location_start)],
+            states={
+                GET_LOCATION: [MessageHandler(filters.LOCATION, get_location_and_search)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(location_handler)
+
+        event_handler = ConversationHandler(
+            entry_points=[CommandHandler('create_event', event_name)],
+            states={
+                EVENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_date)],
+                EVENT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_time)],
+                EVENT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_location)],
+                EVENT_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, event_description)],
+                EVENT_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_event)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(event_handler)
+
+        poll_handler = ConversationHandler(
+            entry_points=[CommandHandler('poll', start_poll)],
+            states={
+                POLL_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, poll_options_input)],
+                POLL_OPTIONS_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, create_poll)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(poll_handler)
+
+        feedback_handler = ConversationHandler(
+            entry_points=[CommandHandler('feedback', feedback_start)],
+            states={
+                FEEDBACK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_text)],
+                FEEDBACK_CONFIRMATION: [CallbackQueryHandler(confirm_feedback, pattern='^confirm_feedback$'),
+                                         CallbackQueryHandler(cancel_feedback, pattern='^cancel_feedback$')],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(feedback_handler)
+
+        bug_handler = ConversationHandler(
+            entry_points=[CommandHandler('bug', bug_start)],
+            states={
+                BUG_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, bug_description)],
+                BUG_REPRODUCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bug_reproduce)],
+                BUG_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bug_contact)],
+                BUG_CONFIRMATION: [CallbackQueryHandler(confirm_bug, pattern='^confirm_bug$'),
+                                   CallbackQueryHandler(cancel_bug, pattern='^cancel_bug$')],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(bug_handler)
+
+        contact_handler = ConversationHandler(
+            entry_points=[CommandHandler('contact', contact_start)],
+            states={
+                CONTACT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_name)],
+                CONTACT_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_email)],
+                CONTACT_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact_message)],
+                CONTACT_CONFIRMATION: [CallbackQueryHandler(confirm_contact, pattern='^confirm_contact$'),
+                                       CallbackQueryHandler(cancel_contact, pattern='^cancel_contact$')],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(contact_handler)
+
+        subscribe_handler = ConversationHandler(
+            entry_points=[CommandHandler('subscribe', subscribe_command)],
+            states={
+                SUBSCRIBE_CONFIRMATION: [CallbackQueryHandler(confirm_subscribe, pattern='^confirm_subscribe$'),
+                                         CallbackQueryHandler(cancel_subscribe, pattern='^cancel_subscribe$')],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(subscribe_handler)
+
+        unsubscribe_handler = ConversationHandler(
+            entry_points=[CommandHandler('unsubscribe', unsubscribe_command)],
+            states={
+                UNSUBSCRIBE_CONFIRMATION: [CallbackQueryHandler(confirm_unsubscribe, pattern='^confirm_unsubscribe$'),
+                                           CallbackQueryHandler(cancel_unsubscribe, pattern='^cancel_unsubscribe$')],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(unsubscribe_handler)
+
+        check_status_handler = ConversationHandler(
+            entry_points=[CommandHandler('check_status', check_status_start)],
+            states={
+                CHECK_STATUS_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_status_id)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_command)],
+        )
+        application.add_handler(check_status_handler)
+
+        webapp_handler = CommandHandler('webapp', webapp_start)
+        application.add_handler(webapp_handler)
+        application.add_handler(CommandHandler('help', help_command))
+
+        logger.info("Manejadores del bot cargados.")
+
+        # Establece la URL del webhook en Telegram
+        await application.bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"Webhook configurado en la URL: {WEBHOOK_URL}")
+
+        yield
+    except Exception as e:
+        logger.error(f"Error durante la inicialización de la aplicación: {e}")
+        sys.exit(1)
+    finally:
+        logger.info("Apagando aplicación FastAPI...")
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/")
+async def webhook_handler(request: Request):
+    global application
+    if application is None:
+        logger.error("La aplicación de Telegram no se ha inicializado.")
+        raise HTTPException(status_code=500, detail="Bot application not initialized.")
+        
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Error al procesar la actualización: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Servidor FastAPI iniciado.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if application and application.running:
+        await application.stop()
+        logger.info("Aplicación del bot de Telegram detenida.")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)

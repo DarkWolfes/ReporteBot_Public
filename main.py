@@ -732,7 +732,7 @@ async def create_app():
     logger.info("Aplicación del bot de Telegram inicializada.")
     
     try:
-        await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
+        await application.bot.set_webhook(url=WEBHOOK_URL)
     except error.TelegramError as e:
         logger.error(f"Error al configurar el webhook: {e}")
     except Exception as e:
@@ -768,3 +768,4 @@ async def shutdown_event():
     if application and application.running:
         await application.stop()
         logger.info("Aplicación del bot de Telegram detenida.")
+

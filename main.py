@@ -1,6 +1,6 @@
-import sqlite3
 import logging
 import os
+import re
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, Chat, InlineKeyboardMarkup, InlineKeyboardButton, error
 from telegram.ext import (
@@ -13,7 +13,9 @@ from telegram.ext import (
     CallbackQueryHandler,
     Application
 )
-import re
+
+# Importamos la librería de Firestore
+from google.cloud import firestore
 
 # Configuración del logging
 logging.basicConfig(
@@ -35,100 +37,113 @@ GET_REPORT_DESCRIPTION = 5
 GET_REPORT_PHOTO = 6
 AWAITING_RECONFIG_CONFIRMATION = 8
 
-# --- FUNCIONES DE BASE DE DATOS ---
+# --- FUNCIONES DE BASE DE DATOS PARA FIRESTORE ---
+try:
+    db = firestore.Client()
+    logger.info("Cliente de Firestore inicializado correctamente.")
+except Exception as e:
+    logger.error(f"Error al inicializar el cliente de Firestore: {e}")
+    db = None
+
 def init_db():
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users_config (
-            user_id INTEGER PRIMARY KEY,
-            channel_id TEXT,
-            admin_ids TEXT,
-            is_configured BOOLEAN
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS group_to_channel_map (
-            group_id INTEGER PRIMARY KEY,
-            channel_id TEXT,
-            group_name TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    # Firestore no necesita una función de inicialización de tablas.
+    # Las colecciones se crean automáticamente al escribir el primer documento.
+    logger.info("Firestore no requiere inicialización de la base de datos. Las colecciones se crean automáticamente.")
+    if db:
+        logger.info("Conexión con Firestore establecida.")
+    else:
+        logger.error("No se pudo conectar a Firestore.")
 
 def get_user_config(user_id):
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT channel_id, admin_ids, is_configured FROM users_config WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    if result:
-        channel_id, admin_ids_str, is_configured = result
-        return {
-            'channel_id': channel_id,
-            'admin_ids': [int(id) for id in admin_ids_str.split(',')] if admin_ids_str else [],
-            'is_configured': bool(is_configured)
-        }
-    return None
+    if not db: return None
+    try:
+        doc_ref = db.collection('users_config').document(str(user_id))
+        doc = doc_ref.get()
+        if doc.exists:
+            config_data = doc.to_dict()
+            admin_ids_str = config_data.get('admin_ids', '')
+            return {
+                'channel_id': config_data.get('channel_id'),
+                'admin_ids': [int(id) for id in admin_ids_str.split(',')] if admin_ids_str else [],
+                'is_configured': config_data.get('is_configured', False)
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error al obtener la configuración del usuario en Firestore: {e}")
+        return None
 
 def save_user_config(user_id, channel_id, admin_ids, is_configured=True):
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    admin_ids_str = ','.join(map(str, admin_ids))
-    cursor.execute('''
-        INSERT OR REPLACE INTO users_config (user_id, channel_id, admin_ids, is_configured) 
-        VALUES (?, ?, ?, ?)
-    ''', (user_id, channel_id, admin_ids_str, is_configured))
-    conn.commit()
-    conn.close()
+    if not db: return
+    try:
+        admin_ids_str = ','.join(map(str, admin_ids))
+        doc_ref = db.collection('users_config').document(str(user_id))
+        doc_ref.set({
+            'channel_id': channel_id,
+            'admin_ids': admin_ids_str,
+            'is_configured': is_configured
+        })
+        logger.info(f"Configuración del usuario {user_id} guardada en Firestore.")
+    except Exception as e:
+        logger.error(f"Error al guardar la configuración del usuario en Firestore: {e}")
 
 def delete_user_config(user_id):
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM users_config WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
+    if not db: return
+    try:
+        db.collection('users_config').document(str(user_id)).delete()
+        logger.info(f"Configuración del usuario {user_id} eliminada de Firestore.")
+    except Exception as e:
+        logger.error(f"Error al eliminar la configuración del usuario en Firestore: {e}")
 
 def save_group_to_channel_map(group_id, channel_id, group_name):
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO group_to_channel_map (group_id, channel_id, group_name) 
-        VALUES (?, ?, ?)
-    ''', (group_id, channel_id, group_name))
-    conn.commit()
-    conn.close()
+    if not db: return
+    try:
+        doc_ref = db.collection('group_to_channel_map').document(str(group_id))
+        doc_ref.set({
+            'channel_id': channel_id,
+            'group_name': group_name
+        })
+        logger.info(f"Mapeo de grupo {group_id} a canal {channel_id} guardado en Firestore.")
+    except Exception as e:
+        logger.error(f"Error al guardar el mapeo de grupo en Firestore: {e}")
 
 def delete_group_from_channel_map(group_id):
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM group_to_channel_map WHERE group_id = ?', (group_id,))
-    conn.commit()
-    conn.close()
+    if not db: return
+    try:
+        db.collection('group_to_channel_map').document(str(group_id)).delete()
+        logger.info(f"Mapeo de grupo {group_id} eliminado de Firestore.")
+    except Exception as e:
+        logger.error(f"Error al eliminar el mapeo del grupo en Firestore: {e}")
 
 def delete_groups_for_channel_id(channel_id):
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM group_to_channel_map WHERE channel_id = ?', (channel_id,))
-    conn.commit()
-    conn.close()
+    if not db: return
+    try:
+        groups_to_delete = db.collection('group_to_channel_map').where('channel_id', '==', channel_id).stream()
+        for group in groups_to_delete:
+            group.reference.delete()
+        logger.info(f"Mapeos de grupos para el canal {channel_id} eliminados de Firestore.")
+    except Exception as e:
+        logger.error(f"Error al eliminar los grupos para el canal {channel_id} en Firestore: {e}")
 
 def get_channel_id_from_group_id(group_id):
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT channel_id FROM group_to_channel_map WHERE group_id = ?', (group_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
+    if not db: return None
+    try:
+        doc_ref = db.collection('group_to_channel_map').document(str(group_id))
+        doc = doc_ref.get()
+        if doc.exists:
+            return doc.to_dict().get('channel_id')
+        return None
+    except Exception as e:
+        logger.error(f"Error al obtener el ID del canal del grupo {group_id} en Firestore: {e}")
+        return None
 
 def get_groups_for_channel_id(channel_id):
-    conn = sqlite3.connect('bot_config.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT group_id, group_name FROM group_to_channel_map WHERE channel_id = ?', (channel_id,))
-    result = cursor.fetchall()
-    conn.close()
-    return result
+    if not db: return []
+    try:
+        groups = db.collection('group_to_channel_map').where('channel_id', '==', channel_id).stream()
+        return [(int(group.id), group.to_dict().get('group_name')) for group in groups]
+    except Exception as e:
+        logger.error(f"Error al obtener grupos para el canal {channel_id} en Firestore: {e}")
+        return []
 
 def is_admin(user_id):
     config = get_user_config(user_id)
@@ -252,9 +267,9 @@ async def get_channel_id_from_forward(update: Update, context: ContextTypes.DEFA
         match = re.search(r"c\/(-?\d+)\/(\d+)", text)
         if match:
             channel_id_str = match.group(1)
-            channel_id = int(f"-100{channel_id_str}")
+            channel_id = f"-100{channel_id_str}"
         elif re.match(r"^-?\d+$", text):
-            channel_id = int(text)
+            channel_id = text
 
     if not channel_id:
         await update.message.reply_text(
@@ -718,11 +733,11 @@ async def create_app():
     
     try:
         await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
-        logger.info("Webhook configurado correctamente.")
-    except Exception as e:
+    except error.TelegramError as e:
         logger.error(f"Error al configurar el webhook: {e}")
-        # No levantamos una excepción para que el server pueda arrancar
-        pass
+    except Exception as e:
+        logger.error(f"Error inesperado al configurar el webhook: {e}")
+    
 
 # --- Rutas de FastAPI ---
 @app.post(f"/{BOT_TOKEN}")

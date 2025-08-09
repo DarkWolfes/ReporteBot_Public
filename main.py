@@ -968,7 +968,3 @@ async def shutdown_event():
     if application and application.running:
         await application.stop()
         logger.info("Aplicación del bot de Telegram detenida.")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
